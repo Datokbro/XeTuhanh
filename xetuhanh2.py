@@ -1,7 +1,10 @@
 import network
 import socket
+import machine
 from machine import Pin, PWM, time_pulse_us
 import time
+
+machine.freq(240000000)   # dung 240 MHz nhu bao cao (mac dinh MicroPython la 160 MHz)
 
 # =====================  THONG SO DIEU KHIEN  =====================
 TOC_DO_MAX  = 45
@@ -10,22 +13,23 @@ TOC_DO_QUAY = 45
 
 KC_BAT_DAU_CHAM = 55.0
 KC_DUNG = 16.0
-SO_LAN_XAC_NHAN = 2       
-DEBUG = True              
+SO_LAN_XAC_NHAN = 2
+DEBUG = True
 
 T_LUI      = 0.3
-T_LUI_KET  = 0.6          
+T_LUI_KET  = 0.6
 T_RE       = 0.4
 T_QUAY_DAU = 0.7
 
-KC_THOANG_TRUOC = 40.0    
+KC_THOANG_TRUOC = 40.0
 GIOI_HAN_XOAY = 1.0
-tich_luy_xoay = 0.0       
+SO_LAN_THU_TOI_DA = 12    # [MOI] qua so lan nay ma chua thoat vat can -> dung han, chuyen MANUAL
+tich_luy_xoay = 0.0
 
-DAO_MOTOR_TRAI = True     
-DAO_MOTOR_PHAI = True     
-HOAN_DOI_TRAI_PHAI = False 
-DAO_HUONG_RE = False      
+DAO_MOTOR_TRAI = True
+DAO_MOTOR_PHAI = True
+HOAN_DOI_TRAI_PHAI = False
+DAO_HUONG_RE = False
 
 # =====================  CHAN NOI ESP32  =====================
 CHAN_TRAI = {"in": (2, 4, 16, 17), "ena": 15, "enb": 5}
@@ -84,7 +88,10 @@ def do_khoang_cach():
 
 def do_khoang_cach_chinh_xac():
     global kc_truoc_do
-    ds = [_do_mot_lan() for _ in range(3)]
+    ds = []
+    for _ in range(3):
+        ds.append(_do_mot_lan())
+        time.sleep_ms(30)          # [SUA] cach nhau 30 ms de tranh vang song cu
     ds.sort()
     kc_truoc_do = ds[1]
     return ds[1]
@@ -108,7 +115,7 @@ def chay_thang(toc_do):
     if dang_dung_im and toc_do > 0:
         trai.chay(65); phai.chay(65)
         time.sleep_ms(40)
-        dang_dung_im = False
+    dang_dung_im = False if toc_do > 0 else dang_dung_im
     trai.chay(toc_do); phai.chay(toc_do)
 
 def lui(giay=0):
@@ -148,32 +155,6 @@ def tinh_toc_do(khoang_cach):
     ty_le = (khoang_cach - KC_DUNG) / (KC_BAT_DAU_CHAM - KC_DUNG)
     return int(TOC_DO_MIN + (ty_le * ty_le) * (TOC_DO_MAX - TOC_DO_MIN))
 
-# =====================  XU LY VAT CAN KHONG SERVO  =====================
-quay_dau_ben_phai = True
-def xu_ly_vat_can():
-    global quay_dau_ben_phai
-    phanh_chong_troi(); time.sleep(0.3)
-    lan = 0
-    while True:
-        lan += 1
-        can_lui = (lan == 1 or lan % 3 == 0)
-        if can_lui: lui(T_LUI_KET if lan >= 2 else T_LUI)
-        
-        if tich_luy_xoay > 0.3: huong = "trai"
-        elif tich_luy_xoay < -0.3: huong = "phai"
-        else:
-            huong = "phai" if quay_dau_ben_phai else "trai"
-            quay_dau_ben_phai = not quay_dau_ben_phai
-
-        da_re = xoay_co_gioi_han(huong, T_RE)
-        if not da_re:
-            huong_nguoc = "trai" if huong == "phai" else "phai"
-            xoay_co_gioi_han(huong_nguoc, T_QUAY_DAU)
-        
-        time.sleep(0.2)
-        d_truoc = do_khoang_cach_chinh_xac()
-        if d_truoc > KC_THOANG_TRUOC: return
-
 # =====================  WIFI AP & WEB SERVER  =====================
 ap = network.WLAN(network.AP_IF)
 ap.config(essid="Xe_Tu_Hanh_ESP32", password="12345678", authmode=3)
@@ -197,7 +178,6 @@ HTML = """<!DOCTYPE html><html><head>
 </style>
 <script>
   function c(cmd) { fetch('/?cmd=' + cmd); }
-  // Tu dong lay khoang cach moi 0.5 giay ma khong reload trang
   setInterval(function() {
     fetch('/?cmd=DIST')
       .then(response => response.text())
@@ -214,14 +194,90 @@ HTML = """<!DOCTYPE html><html><head>
   <div class="row"><button class="btn" onmousedown="c('F')" onmouseup="c('S')" ontouchstart="c('F')" ontouchend="c('S')">Lên</button></div>
   <div class="row">
     <button class="btn" onmousedown="c('L')" onmouseup="c('S')" ontouchstart="c('L')" ontouchend="c('S')">Trái</button>
-    <button class="btn btn-stop" onclick="c('S')">DỪNG</button>
+    <button class="btn btn-stop" onclick="c('STOP')">DỪNG</button>
     <button class="btn" onmousedown="c('R')" onmouseup="c('S')" ontouchstart="c('R')" ontouchend="c('S')">Phải</button>
   </div>
   <div class="row"><button class="btn" onmousedown="c('B')" onmouseup="c('S')" ontouchstart="c('B')" ontouchend="c('S')">Xuống</button></div>
 </body></html>"""
 
+che_do = "AUTO"
+
+def xu_ly_web():
+    """Doc 1 request (neu co) va thuc thi. Goi o vong chinh VA ben trong xu_ly_vat_can."""
+    global che_do
+    try:
+        conn, addr = s.accept()
+    except OSError:
+        return                                   # khong co ket noi moi
+    try:
+        conn.settimeout(0.3)                     # [SUA] tranh treo khi trinh duyet mo san ket noi
+        req = conn.recv(1024).decode('utf-8')
+        dong1 = req.split('\r\n')[0]             # vi du: GET /?cmd=F HTTP/1.1
+        cmd = None
+        if 'cmd=' in dong1:
+            cmd = dong1.split('cmd=')[1].split(' ')[0]
+
+        if cmd == 'DIST':
+            conn.sendall('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n' + "{:.1f}".format(kc_truoc_do))
+        elif cmd is None:
+            conn.sendall('HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n' + HTML)
+        else:
+            if cmd == 'STOP':                    # [MOI] dung khan cap: luon co tac dung, ca o AUTO
+                che_do = "MANUAL"; dung()
+            elif cmd == 'AUTO':
+                che_do = "AUTO"; dung()
+            elif cmd == 'MANUAL':
+                che_do = "MANUAL"; dung()
+            elif che_do == "MANUAL":
+                if cmd == 'F': chay_thang(TOC_DO_MAX)
+                elif cmd == 'B': lui(0)
+                elif cmd == 'L': xoay_trai(0)
+                elif cmd == 'R': xoay_phai(0)
+                elif cmd == 'S': dung()
+            conn.sendall('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK')   # [SUA] khong gui lai ca trang HTML
+    except Exception as e:
+        if DEBUG: print("web loi:", e)
+    finally:
+        conn.close()
+
+# =====================  XU LY VAT CAN KHONG SERVO  =====================
+quay_dau_ben_phai = True
+def xu_ly_vat_can():
+    global quay_dau_ben_phai, tich_luy_xoay, che_do
+    phanh_chong_troi(); time.sleep(0.3)
+    lan = 0
+    while True:
+        xu_ly_web()                              # [MOI] van nhan lenh khi dang ne
+        if che_do != "AUTO":                     # nguoi dung bam DUNG / MANUAL
+            dung(); return
+
+        lan += 1
+        if lan > SO_LAN_THU_TOI_DA:              # [MOI] chong ket vo han
+            dung(); che_do = "MANUAL"
+            print("Ket qua: khong thoat duoc vat can -> dung, chuyen MANUAL")
+            return
+
+        can_lui = (lan == 1 or lan % 3 == 0)
+        if can_lui: lui(T_LUI_KET if lan >= 2 else T_LUI)
+
+        if tich_luy_xoay > 0.3: huong = "trai"
+        elif tich_luy_xoay < -0.3: huong = "phai"
+        else:
+            huong = "phai" if quay_dau_ben_phai else "trai"
+            quay_dau_ben_phai = not quay_dau_ben_phai
+
+        da_re = xoay_co_gioi_han(huong, T_RE)
+        if not da_re:
+            huong_nguoc = "trai" if huong == "phai" else "phai"
+            xoay_co_gioi_han(huong_nguoc, T_QUAY_DAU)
+
+        time.sleep(0.2)
+        d_truoc = do_khoang_cach_chinh_xac()
+        if d_truoc > KC_THOANG_TRUOC:
+            tich_luy_xoay = 0.0                  # [MOI] thoat duoc -> xoa bo dem, lan ne sau bat dau lai
+            return
+
 # =====================  CHUONG TRINH CHINH  =====================
-che_do = "AUTO"  
 dem_gan = 0
 
 try:
@@ -229,39 +285,14 @@ try:
     time.sleep(1)
 
     while True:
-        # 1. Kiem tra Web Server co lenh moi khong
-        try:
-            conn, addr = s.accept()
-            req = conn.recv(1024).decode('utf-8')
-            
-            # Neu App/Web hoi khoang cach, tra ve so roi ngat ket noi luon
-            if '/?cmd=DIST' in req:
-                conn.send('HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n' + "{:.1f}".format(kc_truoc_do))
-                conn.close()
-                continue
-                
-            if '/?cmd=AUTO' in req: che_do = "AUTO"; dung()
-            elif '/?cmd=MANUAL' in req: che_do = "MANUAL"; dung()
-            elif che_do == "MANUAL":
-                if '/?cmd=F' in req: chay_thang(TOC_DO_MAX)
-                elif '/?cmd=B' in req: lui(0)       
-                elif '/?cmd=L' in req: xoay_trai(0) 
-                elif '/?cmd=R' in req: xoay_phai(0) 
-                elif '/?cmd=S' in req: dung()
-            
-            # Tra ve giao dien HTML chinh neu khong phai lenh lay khoang cach
-            conn.send('HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n' + HTML)
-            conn.close()
-        except OSError:
-            pass # Khong co request tu dien thoai thi bo qua
+        xu_ly_web()
 
-        # 2. Xu ly di chuyen theo Che do
         if che_do == "AUTO":
             d = do_khoang_cach()
             v = tinh_toc_do(d)
             if DEBUG:
-                print("d={:.1f}cm  v={}%".format(d, v)) # Van in ra may tinh binh thuong
-                
+                print("d={:.1f}cm  v={}%".format(d, v))
+
             if v == 0:
                 dem_gan += 1
                 if dem_gan >= SO_LAN_XAC_NHAN:
@@ -273,11 +304,11 @@ try:
                 dem_gan = 0
                 chay_thang(v)
         else:
-            # CHE DO MANUAL: Van doc cam bien de an toan va hien thi len man hinh
+            # MANUAL: van doc cam bien de an toan va hien thi
             d = do_khoang_cach()
-            if d <= KC_DUNG and not dang_dung_im: 
+            if d <= KC_DUNG and not dang_dung_im:
                 dung()
-                
+
         time.sleep_ms(20)
 
 except KeyboardInterrupt:
